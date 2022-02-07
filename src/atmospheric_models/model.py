@@ -7,6 +7,7 @@ import re
 from abc import ABC
 
 import numpy as np
+from scipy.interpolate import interp1d
 import pandas as pd
 from astropy.io import fits
 from astropy import units as u
@@ -41,6 +42,59 @@ class AtmosphericModel(ABC):
     def feh(self):
         """Model metallicity"""
         return self._feh
+
+    def apparent_flux(self, stellar_radius=1.0*u.Rsun, stellar_distance=10.0*u.pc,
+                      Av=None, wavlim=None,
+                      return_w_unit=u.um, return_flux_unit=(u.erg/u.s/u.cm/u.cm)):
+        '''
+        Return the apparent flux for the given model.
+
+        Arguments:
+        ----------
+        stellar_radius: float or u.Quantity
+            Stellar radius. If units are not provided, assumed to be in Rsun.
+        stellar_distance : float or u.Quantity
+            Stellar distance. If units are not provided, assumed to be in pc.
+        Av : float or None
+            If provided, uses the extinction law to correct fluxes.
+        wavlim : tuple
+            If no unit provided, assumes this is in um.
+        '''
+        if not isinstance(stellar_radius, u.Quantity):
+            stellar_radius *= u.Rsun
+        if not isinstance(stellar_distance, u.Quantity):
+            stellar_distance *= u.pc
+
+        flux_norm = (stellar_radius / stellar_distance).to(u.dimensionless_unscaled)**2
+        app_flux = self.flux * flux_norm
+
+        if Av is not None:
+            ext_df = pd.read_csv(os.path.join(MODEL_BASEDIR, 'extinction_law.ascii'),
+                                 delim_whitespace=True, names=['wl', 'ext'])
+            ext_law = interp1d(ext_df.wl, ext_df.ext, bounds_error=False, fill_value=np.nan)
+            kapv = ext_law(0.55) # A_V
+            w_um = self.w.to(u.um).value
+            kapp1 = ext_law(w_um)
+            taul1 = kapp1/kapv/1.086*Av
+            extinct1 = np.exp(-taul1)
+            app_flux = app_flux * extinct1
+
+        if wavlim is not None:
+            wavmin, wavmax = wavlim
+            if not isinstance(wavmin, u.Quantity):
+                wavmin *= u.um
+            if not isinstance(wavmax, u.Quantity):
+                wavmax *= u.um
+            w_mask = (self.w >= wavmin) & (self.w <= wavmax)
+            w = self.w[w_mask]
+            app_flux = app_flux[w_mask]
+        else:
+            w = self.w
+
+        w = w.to(return_w_unit).value
+        app_flux = app_flux.to(return_flux_unit).value
+
+        return w, app_flux
 
 
 class KuruczMT(AtmosphericModelTable):
@@ -115,21 +169,21 @@ class KuruczMT(AtmosphericModelTable):
 
 
 class KuruczModel(AtmosphericModel):
-    def __init__(self, w, flux, teff, logg, feh,
+    def __init__(self, w, flux_density, teff, logg, feh,
                  w_unit=u.Angstrom,
-                 flux_unit=(u.erg / u.s / u.cm / u.cm / u.Angstrom),
+                 flux_density_unit=(u.erg / u.s / u.cm / u.cm / u.Angstrom),
                  header=None, filename=None):
         self._model_source = 'Kurucz'
-        self.w = w
-        self.flux = flux
+        self.w = w * w_unit
+        self.flux_density = flux_density * flux_density_unit
+        self.flux = self.flux_density * self.w
         self._teff = teff
         self._logg = logg
         self._feh = feh
-        self.w_unit = w_unit
-        self.flux_unit = flux_unit
         self.header = header
         self.filename = filename
         return
+
 
     @classmethod
     def from_fits(cls, filename, logg=3.5):
